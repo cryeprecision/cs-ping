@@ -11,4 +11,9 @@ reqwest = "0.11.10"
 regex = "1.5.5"
 tokio = "1.17.0"
 futures = "0.3.21"
-zzz = "0.1.4"
+zzz = { version = "0.1.4", features = ["streams"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true

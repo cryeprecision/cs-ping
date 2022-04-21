@@ -5,11 +5,21 @@ use std::net::IpAddr;
 use std::net::ToSocketAddrs;
 use std::rc::Rc;
 use std::time::Duration;
-use zzz::{ProgressBar, ProgressBarIterExt};
+use zzz::{ProgressBar, ProgressBarIterExt, ProgressBarStreamExt};
 
 const MAX_CONCURRENT_JOBS: usize = 8;
-const MAX_TIMEOUT_RETIRES: usize = 5;
-const PING_AVERAGE_COUNT: usize = 5;
+const MAX_TIMEOUT_RETIRES: usize = 3;
+const PING_AVERAGE_COUNT: usize = 6;
+
+async fn try_ping(addr: IpAddr) -> Option<Duration> {
+    match surge_ping::ping(addr).await {
+        Err(err) => match err {
+            surge_ping::SurgeError::Timeout { seq: _ } => None,
+            _ => panic!("{}", err),
+        },
+        Ok((_, duration)) => Some(duration),
+    }
+}
 
 async fn ping(addr: IpAddr) -> Option<[Duration; PING_AVERAGE_COUNT]> {
     let mut result = [Duration::default(); PING_AVERAGE_COUNT];
@@ -18,43 +28,19 @@ async fn ping(addr: IpAddr) -> Option<[Duration; PING_AVERAGE_COUNT]> {
 
     while let Some(result_slot) = result_iter.next() {
         loop {
-            match surge_ping::ping(addr).await {
-                Ok((_, duration)) => {
-                    *result_slot = duration;
+            match try_ping(addr).await {
+                Some(val) => {
+                    *result_slot = val;
                     break;
                 }
-                Err(err) => match err {
-                    surge_ping::SurgeError::Timeout { seq: _ } => {
-                        if timeouts_left == 0 {
-                            return None;
-                        }
-                        timeouts_left -= 1;
-                    }
-                    _ => panic!("{}", err),
-                },
+                None => timeouts_left -= 1,
+            }
+            if timeouts_left == 0 {
+                return None;
             }
         }
     }
     return Some(result);
-}
-
-fn get_average_ms(durations: &[Duration; PING_AVERAGE_COUNT]) -> f32 {
-    (durations
-        .iter()
-        .fold(0f32, |acc, next| acc + next.as_secs_f32())
-        / (PING_AVERAGE_COUNT as f32))
-        * 1000f32
-}
-
-fn get_std_dev(durations: &[Duration; PING_AVERAGE_COUNT]) -> f32 {
-    let (sum, sum_sq) = durations
-        .iter()
-        .fold((0f32, 0f32), |(acc, acc_sq), duration| {
-            let ms = duration.as_secs_f32() * 1000f32;
-            (acc + ms, acc_sq + (ms * ms))
-        });
-    return (sum_sq - (sum * sum) / (PING_AVERAGE_COUNT as f32))
-        / ((PING_AVERAGE_COUNT - 1) as f32);
 }
 
 fn get_socket_addresses(location: &str) -> Vec<IpAddr> {
@@ -108,6 +94,60 @@ impl Job {
     }
 }
 
+#[derive(Debug)]
+struct PingStats {
+    avg: f32,
+    std_dev: f32,
+    min: f32,
+    max: f32,
+    all: [f32; PING_AVERAGE_COUNT],
+}
+
+impl PartialEq for PingStats {
+    fn eq(&self, other: &Self) -> bool {
+        self.avg.eq(&other.avg)
+    }
+}
+impl PartialOrd for PingStats {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.avg.partial_cmp(&other.avg)
+    }
+}
+
+impl PingStats {
+    fn avg(ms: &[f32; PING_AVERAGE_COUNT]) -> f32 {
+        let folder = |acc, next| acc + next;
+        return ms.iter().fold(0_f32, folder) / (PING_AVERAGE_COUNT as f32);
+    }
+    fn std_dev(ms: &[f32; PING_AVERAGE_COUNT]) -> f32 {
+        let folder = |(acc, acc_sq), ms| (acc + ms, acc_sq + (ms * ms));
+        let (sum, sum_sq) = ms.iter().fold((0_f32, 0_f32), folder);
+        let s1 = (sum * sum) / (PING_AVERAGE_COUNT as f32);
+        return ((sum_sq - s1) / ((PING_AVERAGE_COUNT - 1) as f32)).sqrt();
+    }
+    fn min(ms: &[f32; PING_AVERAGE_COUNT]) -> f32 {
+        let reducer = |min, next| if next < min { next } else { min };
+        return ms.iter().reduce(reducer).unwrap().to_owned();
+    }
+    fn max(ms: &[f32; PING_AVERAGE_COUNT]) -> f32 {
+        let reducer = |max, next| if next > max { next } else { max };
+        return ms.iter().reduce(reducer).unwrap().to_owned();
+    }
+
+    fn new(durations: &[Duration; PING_AVERAGE_COUNT]) -> Self {
+        let ms = durations.map(|d| d.as_secs_f32() * 1000_f32);
+        Self {
+            avg: Self::avg(&ms),
+            std_dev: Self::std_dev(&ms),
+            min: Self::min(&ms),
+            max: Self::max(&ms),
+            all: ms,
+        }
+    }
+}
+
+// fn post_process_results(results: Vec<>)
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let script_text = get_script_text().await;
@@ -134,42 +174,48 @@ async fn main() {
         }
     }
 
-    let mut pb = ProgressBar::with_target(jobs.len());
-    pb.set_message(Some("Pinging IPs"));
+    let mut pb = ProgressBar::smart();
+    pb.set_message(Some("    Pinging IPs    "));
 
     let futures = jobs.into_iter().map(Job::run).collect::<Vec<_>>();
-    let mut stream = futures::stream::iter(futures).buffer_unordered(MAX_CONCURRENT_JOBS);
+    let mut stream = futures::stream::iter(futures)
+        .buffer_unordered(MAX_CONCURRENT_JOBS)
+        .with_progress(pb);
 
-    let mut result_map = HashMap::<String, Option<(f32, f32)>>::new();
+    let mut result_map = HashMap::<String, Option<PingStats>>::new();
 
     while let Some((job, output)) = stream.next().await {
-        pb.add(1);
-        let entry = result_map
-            .entry(job.shared.locations[job.index].clone())
-            .or_default();
-        let (duration_ms, std_dev) = match output.durations {
-            Some(val) => (get_average_ms(&val), get_std_dev(&val)),
+        let location = job.shared.locations[job.index].clone();
+        let entry = result_map.entry(location).or_default();
+        let stats = match output.durations {
+            Some(val) => PingStats::new(&val),
             None => continue,
         };
-        if entry.is_none() || duration_ms.partial_cmp(&entry.unwrap().0).unwrap() == Ordering::Less
-        {
-            *entry = Some((duration_ms, std_dev));
+        if entry.is_none() || &stats < entry.as_ref().unwrap() {
+            *entry = Some(stats);
         }
     }
-    drop(pb);
+    drop(stream);
 
     let mut results = result_map.into_iter().collect::<Vec<_>>();
-    results.sort_unstable_by(|(_, lhs_ms), (_, rhs_ms)| {
-        let lhs_ms = lhs_ms.map_or(std::f32::MAX, |(ms, _)| ms);
-        let rhs_ms = rhs_ms.map_or(std::f32::MAX, |(ms, _)| ms);
-        return lhs_ms.partial_cmp(&rhs_ms).unwrap();
+    results.sort_unstable_by(|(_, lhs), (_, rhs)| {
+        if lhs.is_none() && rhs.is_none() {
+            Ordering::Equal
+        } else if rhs.is_none() {
+            Ordering::Less
+        } else if lhs.is_none() {
+            Ordering::Greater
+        } else {
+            lhs.partial_cmp(rhs).unwrap()
+        }
     });
 
     for (name, opt) in results {
         match opt {
-            Some((ms, std_dev)) => {
-                println!("{: <20} -> {: >5.0}ms, ±{: <5.2}ms", name, ms, std_dev)
-            }
+            Some(stats) => println!(
+                "{: <20} -> {: >4.0}ms ±{: >2.0}ms range: [{: >4.0}, {: <4.0}]",
+                name, stats.avg, stats.std_dev, stats.min, stats.max
+            ),
             None => println!("{: <20} -> TIMEOUT", name),
         }
     }
