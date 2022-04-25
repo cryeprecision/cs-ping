@@ -21,6 +21,6 @@ jobs:
         args: --release
     - name: "Upload Binary"
       uses: actions/upload-artifact@v3
-        with:
-          name: "cs-ping"
-          path: "${{ github.workspace }}/cs-ping/target/release/cs-ping"
+      with:
+        name: "cs-ping"
+        path: "${{ github.workspace }}/cs-ping/target/release/cs-ping"
