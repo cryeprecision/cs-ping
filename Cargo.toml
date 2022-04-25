@@ -3,17 +3,16 @@ name = "cs-ping"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-surge-ping = "0.5.2"
-reqwest = "0.11.10"
-regex = "1.5.5"
-tokio = "1.17.0"
-futures = "0.3.21"
-zzz = { version = "0.1.4", features = ["streams"] }
+surge-ping = "0.5.2" # used to do the actual pinging
+reqwest = "0.11.10" # used to download the script
+regex = "1.5.5" # used to extract the server locations from the script
+tokio = "1.17.0" # used for concurrent pinging
+futures = "0.3.21" # used for managing concurrency
+rand = "0.8.5" # used to shuffle slices
+indicatif = "0.16.2" # used to visualize progress
 
 [profile.release]
-strip = true
-opt-level = "z"
-lto = true
+strip = true # strip debug information from release-builds
+opt-level = "z" # optimize for binary size instead of speed
+lto = true # use link-time-optimization
