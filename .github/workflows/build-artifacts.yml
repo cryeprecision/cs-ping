@@ -23,4 +23,4 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: "cs-ping"
-        path: "${{ github.workspace }}/cs-ping/target/release/cs-ping"
+        path: "${{ github.workspace }}/target/release/cs-ping"
