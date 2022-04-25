@@ -102,7 +102,7 @@ impl Stats {
     }
 
     /// By default, `Some(_)` is always greater than `None`,
-    /// This function reverses this behavious and sets `None` always greater than `Some(_)`.
+    /// This function reverses this behaviour and sets `None` always greater than `Some(_)`.
     pub fn cmp(lhs: &Option<Stats>, rhs: &Option<Stats>) -> Ordering {
         match (lhs, rhs) {
             (None, None) => Ordering::Equal,
