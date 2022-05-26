@@ -12,3 +12,10 @@ Pings all server-locations extracted from this file [cryptostorm.is/wg_confgen.t
   - How many pings are used for statistics
 - `SCRIPT_URL`
   - Link to `wg_confgen.txt`
+
+## How to build
+
+1) Clone the repo
+2) `cd` into the root of the repo
+3) `cargo build --release`
+4) Binary will be in `./target/release/`
