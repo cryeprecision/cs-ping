@@ -9,6 +9,6 @@ Pings all server-locations extracted from this file [cryptostorm.is/wg_confgen.t
 - `MAX_TIMEOUT_RETIRES`
   - How often a ping to the same IP is allowed to time-out
 - `PING_COUNT`
-  - How many pings are used for statistics-calculation
+  - How many pings are used for statistics
 - `SCRIPT_URL`
   - Link to `wg_confgen.txt`
