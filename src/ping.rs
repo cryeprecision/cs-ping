@@ -9,9 +9,8 @@ use std::net::ToSocketAddrs;
 use std::time::Duration;
 
 const MAX_CONCURRENT_PINGS: usize = 8;
-const MAX_TIMEOUT_RETIRES: usize = 3;
+const MAX_TIMEOUT_RETRIES: usize = 3;
 const PING_COUNT: usize = 6;
-const SCRIPT_URL: &str = "https://cryptostorm.is/wg_confgen.txt";
 
 const BAR_FORMAT: &str = "{spinner} {msg} [{pos:>4}/{len:<4}] [{bar:25.cyan/grey}] {eta}";
 // Binary counter - https://raw.githubusercontent.com/sindresorhus/cli-spinners/master/spinners.json
@@ -26,16 +25,6 @@ fn resolve_hostname(hostname: &str) -> impl ExactSizeIterator<Item = IpAddr> {
         .to_socket_addrs()
         .expect("couldn't resolve hostname")
         .map(|s| s.ip())
-}
-
-/// Downloads the script-file and extracts all server locations
-async fn get_locations() -> Vec<String> {
-    let re = regex::Regex::new("(?m)^\"(\\w+):(:?.*?)\"$").expect("couldn't parse regex");
-    let resp = reqwest::get(SCRIPT_URL)
-        .await
-        .expect("couldn't download script");
-    let s = resp.text().await.expect("couldn't get content of script");
-    return re.captures_iter(&s).map(|c| c[1].to_string()).collect();
 }
 
 /// Ping a single address and map a timeout to `None`
@@ -79,47 +68,43 @@ async fn ping_n_with_timeout(
 }
 
 /// Pings `ip` and calculates some stats if successfull, else propagates `None`.
-async fn ping(ip: IpAddr) -> Option<Stats> {
-    let ds = ping_n_with_timeout(ip, PING_COUNT, MAX_TIMEOUT_RETIRES).await;
+async fn ping(ip: IpAddr, max_timeout_retires: usize) -> Option<Stats> {
+    let ds = ping_n_with_timeout(ip, PING_COUNT, max_timeout_retires).await;
     return ds.as_ref().map(Stats::from_durations);
 }
 
-enum JobRunner {
-    /// Holds a list of locations that will be resolved into hostnames
+/// State-machine
+pub enum JobRunner {
+    /// Holds a list of hostnames that will be resolved into IPs
     Waiting(Vec<String>),
 
     /// Holds the same list as above but also a vector of tuples, where the first tuple-element
-    /// is an index into the vector of locations and the second tuple-element is one of the
-    /// many IP-addresses that the location maps to.
+    /// is an index into the vector of hostnames and the second tuple-element is one of the
+    /// many IP-addresses that the hostname maps to.
     Resolved(Vec<String>, Vec<(usize, IpAddr)>),
 
-    /// Holds a vector of tuples where the first tuple-element is the location and the second
+    /// Holds a vector of tuples where the first tuple-element is the hostname and the second
     /// tuple-element is the minimum statistics for the ping to the IP-address out of all
-    /// IP-addresses that the location maps to.
+    /// IP-addresses that the hostname maps to.
     Pinged(Vec<(String, Option<Stats>)>),
 }
 
 impl JobRunner {
-    fn new(locations: Vec<String>) -> JobRunner {
-        JobRunner::Waiting(locations)
+    pub fn new(hostnames: Vec<String>) -> JobRunner {
+        JobRunner::Waiting(hostnames)
     }
 
-    /// Resolve a server location to a list of IPs
-    fn location_to_ips(location: &str) -> impl ExactSizeIterator<Item = IpAddr> {
-        return resolve_hostname(&format!("{}.cstorm.is:443", location));
-    }
-
-    /// Resolve all server locations. The first tuple-element in the return-value
-    /// is an index into the locations-slice.
+    /// Resolve all hostnames. The first tuple-element in the return-value
+    /// is an index into the hostnames-slice.
     ///
     /// The result is shuffled for more consistent results when pinging concurrently.
-    fn resolve_hostnames(locations: &[String]) -> Vec<(usize, IpAddr)> {
+    fn resolve_hostnames(hostnames: &[String]) -> Vec<(usize, IpAddr)> {
         let mut vec = Vec::new();
 
-        let bar = styled_progress_bar(locations.len(), "Resolving hostnames");
+        let bar = styled_progress_bar(hostnames.len(), "Resolving hostnames");
 
-        for (index, location) in locations.iter().enumerate() {
-            let ip_iter = Self::location_to_ips(location);
+        for (index, hostname) in hostnames.iter().enumerate() {
+            let ip_iter = resolve_hostname(hostname);
             vec.reserve(ip_iter.len());
             vec.extend(ip_iter.map(|ip| (index, ip)));
             bar.inc(1);
@@ -134,18 +119,26 @@ impl JobRunner {
     }
 
     async fn ping_all(
-        locations: Vec<String>,
+        hostnames: Vec<String>,
         ips: Vec<(usize, IpAddr)>,
+        max_concurrent_pings: Option<usize>,
+        max_timeout_retries: Option<usize>,
     ) -> Vec<(String, Option<Stats>)> {
-        async fn wrap_ping(tpl: (usize, IpAddr)) -> (usize, Option<Stats>) {
-            (tpl.0, ping(tpl.1).await)
+        async fn wrap_ping(
+            tpl: (usize, IpAddr),
+            max_timeout_retries: usize,
+        ) -> (usize, Option<Stats>) {
+            (tpl.0, ping(tpl.1, max_timeout_retries).await)
         }
+
+        let max_concurrent_pings = max_concurrent_pings.unwrap_or(MAX_CONCURRENT_PINGS);
+        let max_timeout_retries = max_timeout_retries.unwrap_or(MAX_TIMEOUT_RETRIES);
 
         let bar = styled_progress_bar(ips.len(), "Pinging IPs");
         let mut ping_results = Vec::with_capacity(ips.len());
 
-        let futures = ips.into_iter().map(wrap_ping);
-        let mut buffered = iter(futures).buffer_unordered(MAX_CONCURRENT_PINGS);
+        let futures = ips.into_iter().map(|ip| wrap_ping(ip, max_timeout_retries));
+        let mut buffered = iter(futures).buffer_unordered(max_concurrent_pings);
 
         while let Some(tuple) = buffered.next().await {
             ping_results.push(tuple);
@@ -153,69 +146,58 @@ impl JobRunner {
         }
         bar.finish_and_clear();
 
-        ping_results.sort_unstable_by(|(l_index, l_stats), (r_index, r_stats)| {
-            if l_index != r_index {
-                l_index.cmp(r_index)
+        ping_results.sort_unstable_by(|(li, ls), (ri, rs)| {
+            if li != ri {
+                li.cmp(ri)
             } else {
-                Stats::cmp(l_stats, r_stats)
+                Stats::cmp(ls, rs)
             }
         });
 
         let max_index = ping_results.last().unwrap().0;
         let mut results = Vec::with_capacity(max_index);
 
-        // Collect the statistics with the lowest avg-latency for each location
-        let mut locations_iter = locations.into_iter();
+        // Collect the statistics with the lowest avg-latency for each hostname
+        let mut hostnames_iter = hostnames.into_iter();
         let mut ping_iter = ping_results.into_iter();
         while let Some((_, stats)) = ping_iter.find(|(index, _)| index == &results.len()) {
-            results.push((locations_iter.next().unwrap(), stats));
+            results.push((hostnames_iter.next().unwrap(), stats));
         }
+        assert_eq!(hostnames_iter.next(), None);
 
         return results;
     }
 
-    fn waiting_to_resolved(self) -> Self {
+    pub fn waiting_to_resolved(self) -> Self {
         match self {
-            JobRunner::Waiting(locations) => {
-                let hostnames = Self::resolve_hostnames(&locations);
-                return JobRunner::Resolved(locations, hostnames);
+            JobRunner::Waiting(hostnames) => {
+                let ips = Self::resolve_hostnames(&hostnames);
+                return JobRunner::Resolved(hostnames, ips);
             }
             _ => unreachable!("uh oh in resolve hostnames"),
         }
     }
 
-    async fn resolved_to_pinged(self) -> Self {
+    pub async fn resolved_to_pinged(
+        self,
+        max_concurrent_pings: Option<usize>,
+        max_timeout_retries: Option<usize>,
+    ) -> Self {
         match self {
-            JobRunner::Resolved(locations, ips) => {
-                let pings = Self::ping_all(locations, ips).await;
-                return JobRunner::Pinged(pings);
-            }
+            JobRunner::Resolved(hostnames, ips) => JobRunner::Pinged(
+                Self::ping_all(hostnames, ips, max_concurrent_pings, max_timeout_retries).await,
+            ),
             _ => unreachable!("uh oh in ping all ips"),
         }
     }
 
-    fn finalize(self) -> Vec<(String, Option<Stats>)> {
+    pub fn finalize(self) -> Vec<(String, Option<Stats>)> {
         match self {
             JobRunner::Pinged(mut stats) => {
                 stats.sort_unstable_by(|(_, lhs), (_, rhs)| Stats::cmp(&lhs, &rhs));
                 return stats;
             }
             _ => unreachable!("uh oh in get results"),
-        }
-    }
-}
-
-pub async fn ping_all_ips() {
-    let results = JobRunner::new(get_locations().await)
-        .waiting_to_resolved()
-        .resolved_to_pinged()
-        .await
-        .finalize();
-
-    for (location, result) in results.into_iter() {
-        match result {
-            Some(stats) => println!("{:^16} -> {}", location, stats),
-            None => println!("{:^16} -> TIMEOUT", location),
         }
     }
 }
