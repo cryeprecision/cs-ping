@@ -6,15 +6,18 @@ edition = "2021"
 [dependencies]
 surge-ping = { version = "0" }
 reqwest = { version = "0" }
-tokio = { version = "1", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "fs"] }
 trust-dns-resolver = { version = "0", features = ["dns-over-rustls"] }
 futures = { version = "0" }
 rand = { version = "0" }
 indicatif = { version = "0" }
 lazy-regex = { version = "2" }
 anyhow = { version = "1" }
-log = { version = "0" }
-simplelog = { version = "0" }
+log = { version = "0", features = ["release_max_level_info"] }
+env_logger = { version = "0" }
+dotenv = { version = "0" }
+zip = { version = "0", default-features = false }
+chrono = { version = "0" }
 
 [profile.release]
 strip = true
