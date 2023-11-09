@@ -20,15 +20,115 @@ use crate::stats::Stats;
 
 mod stats;
 mod util;
-mod wireguard;
 
 const DEFAULT_SCRIPT_URL: &str = "https://cryptostorm.is/wg_confgen.txt";
 const DEFAULT_CONCURRENT_DNS: usize = 1;
 const DEFAULT_CONCURRENT_PINGS: usize = 5;
-const DEFAULT_PING_COUNT: usize = 5;
+const DEFAULT_PINGS_PER_IP: usize = 5;
 const DEFAULT_PING_RETRIES: usize = 3;
 const DEFAULT_CONFIG_FOLDER: &str = "./configs/";
 const CRYPTOSTORM_SUFFIX: &str = ".cstorm.is";
+
+const TEMPLATE_CLIENT_PRIVATE_KEY: &str = "{{ PRIVATE_KEY }}";
+const TEMPLATE_CLIENT_ADDRESS: &str = "{{ ADDRESS }}";
+const TEMPLATE_CLIENT_DNS: &str = "{{ DNS }}";
+const TEMPLATE_SERVER_PRESHARED_KEY: &str = "{{ PRESHARED_KEY }}";
+const TEMPLATE_SERVER_PUBLIC_KEY: &str = "{{ PUBLIC_KEY }}";
+const TEMPLATE_SERVER_ENDPOINT: &str = "{{ ENDPOINT }}";
+
+const TEMPLATE: &str = "\
+[Interface]
+PrivateKey = {{ PRIVATE_KEY }}
+Address = {{ ADDRESS }}
+DNS = {{ DNS }}
+
+[Peer]
+Presharedkey = {{ PRESHARED_KEY }}
+PublicKey = {{ PUBLIC_KEY }}
+Endpoint = {{ ENDPOINT }}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+";
+
+#[derive(Debug, Clone)]
+struct Config {
+    script_url: Arc<str>,
+    concurrent_dns: usize,
+    concurrent_pings: usize,
+    pings_per_ip: usize,
+    ping_retries: usize,
+    config_folder: Arc<str>,
+    wireguard: WireguardConfig,
+}
+
+#[derive(Debug, Clone)]
+struct WireguardConfig {
+    client_private_key: Arc<str>,
+    client_address: Arc<str>,
+    client_dns: Arc<str>,
+    server_preshared_key: Arc<str>,
+}
+
+impl WireguardConfig {
+    /// Try to load the config from environment variables
+    pub fn from_env() -> anyhow::Result<WireguardConfig> {
+        Ok(WireguardConfig {
+            client_private_key: util::env_var("CONFIG_CLIENT_PRIVATE_KEY", None)
+                .context("env var CONFIG_CLIENT_PRIVATE_KEY missing")?
+                .into(),
+            client_address: util::env_var("CONFIG_CLIENT_ADDRESS", None)
+                .context("env var CONFIG_CLIENT_ADDRESS missing")?
+                .into(),
+            client_dns: util::env_var("CONFIG_CLIENT_DNS", None)
+                .context("env var CONFIG_CLIENT_DNS missing")?
+                .into(),
+            server_preshared_key: util::env_var("CONFIG_SERVER_PRESHARED_KEY", None)
+                .context("env var CONFIG_SERVER_PRESHARED_KEY missing")?
+                .into(),
+        })
+    }
+
+    /// Create a WireGuard configuration file
+    pub fn make_config(&self, server_endpoint: &str, server_public_key: &str) -> String {
+        util::replace_all(
+            TEMPLATE.to_string(),
+            &[
+                (TEMPLATE_CLIENT_PRIVATE_KEY, &self.client_private_key),
+                (TEMPLATE_CLIENT_ADDRESS, &self.client_address),
+                (TEMPLATE_CLIENT_DNS, &self.client_dns),
+                (TEMPLATE_SERVER_PRESHARED_KEY, &self.server_preshared_key),
+                (TEMPLATE_SERVER_PUBLIC_KEY, server_public_key),
+                (TEMPLATE_SERVER_ENDPOINT, server_endpoint),
+            ],
+        )
+    }
+}
+
+impl Config {
+    /// Try to load the config from environment variables
+    pub fn from_env() -> anyhow::Result<Config> {
+        Ok(Config {
+            script_url: util::env_var("SCRIPT_URL", Some(DEFAULT_SCRIPT_URL))
+                .context("env var SCRIPT_URL missing")?
+                .into(),
+            concurrent_dns: util::env_var_parse("CONCURRENT_DNS", Some(DEFAULT_CONCURRENT_DNS))
+                .context("env var CONCURRENT_DNS missing")?,
+            concurrent_pings: util::env_var_parse(
+                "CONCURRENT_PINGS",
+                Some(DEFAULT_CONCURRENT_PINGS),
+            )
+            .context("env var CONCURRENT_PINGS missing")?,
+            pings_per_ip: util::env_var_parse("PINGS_PER_IP", Some(DEFAULT_PINGS_PER_IP))
+                .context("env var PINGS_PER_IP missing")?,
+            ping_retries: util::env_var_parse("PING_RETRIES", Some(DEFAULT_PING_RETRIES))
+                .context("env var PING_RETRIES missing")?,
+            config_folder: util::env_var("CONFIG_FOLDER", Some(DEFAULT_CONFIG_FOLDER))
+                .context("env var CONFIG_FOLDER missing")?
+                .into(),
+            wireguard: WireguardConfig::from_env()?,
+        })
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Host {
@@ -42,12 +142,15 @@ struct Host {
 /// - Download the script file
 /// - Extract hostnames from the script file
 /// - Resolve hostnames into IPv4 addresses
-async fn get_hostnames() -> anyhow::Result<Vec<Host>> {
+async fn get_hostnames(cfg: &Config) -> anyhow::Result<Vec<Host>> {
     let re = lazy_regex::regex!(r#"(?m)^"(\w+):(.*?)"$"#);
-    let url = util::env_var("SCRIPT_URL", Some(DEFAULT_SCRIPT_URL)).unwrap();
 
     // download the script file
-    let resp = reqwest::get(url).await.context("download wg_confgen.txt")?;
+    let resp = reqwest::get(cfg.script_url.as_ref())
+        .await
+        .context("download wg_confgen.txt")?
+        .error_for_status()
+        .context("unexpected response status code")?;
     let text = resp.text().await.context("download wg_confgen.txt")?;
 
     // extract hostnames and corresponding public keys from the txt file
@@ -68,8 +171,6 @@ async fn get_hostnames() -> anyhow::Result<Vec<Host>> {
     let bar = util::styled_progress_bar(hosts.len() as u64, "Resolve Hostnames");
 
     // resolve hostnames into ip addresses
-    let concurrent_dns =
-        util::env_var_parse("CONCURRENT_DNS", Some(DEFAULT_CONCURRENT_DNS)).unwrap();
     let hosts = futures::stream::iter(hosts)
         .map(|(hostname, public_key)| {
             let resolver = &resolver;
@@ -98,7 +199,7 @@ async fn get_hostnames() -> anyhow::Result<Vec<Host>> {
                 })
             }
         })
-        .buffer_unordered(concurrent_dns)
+        .buffer_unordered(cfg.concurrent_dns)
         .collect::<Vec<_>>()
         .await;
 
@@ -140,7 +241,7 @@ impl Job {
         }
     }
 
-    async fn try_resolved_to_pinged(&mut self, bar: &ProgressBar) {
+    async fn try_resolved_to_pinged(&mut self, cfg: &Config, bar: &ProgressBar) {
         let JobState::Resolved { client } = &self.state else {
             self.to_error(anyhow::anyhow!("illegal state transition"));
             return;
@@ -153,11 +254,9 @@ impl Job {
         let payload = [0u8; 32];
         let mut results = Vec::new();
 
-        let ping_count = util::env_var_parse("PING_COUNT", Some(DEFAULT_PING_COUNT)).unwrap();
-        let mut ping_retries =
-            util::env_var_parse("PING_RETRIES", Some(DEFAULT_PING_RETRIES)).unwrap();
+        let mut ping_retries = cfg.ping_retries;
 
-        'outer: for seq in 0..ping_count {
+        'outer: for seq in 0..cfg.pings_per_ip {
             // try to ping the ip with some retries
             let error: anyhow::Error = loop {
                 match pinger.ping(PingSequence(seq as u16), &payload).await {
@@ -165,7 +264,7 @@ impl Job {
                         results.push(duration);
                         bar.inc(1);
 
-                        if results.len() == ping_count {
+                        if results.len() == cfg.pings_per_ip {
                             break 'outer;
                         }
                         continue 'outer;
@@ -181,7 +280,7 @@ impl Job {
                 self.ip, self.host.hostname, seq
             )));
             // accomodate for pings that wont be sent so the bar doesn't ent up partially full
-            bar.inc((ping_count - seq) as u64);
+            bar.inc((cfg.pings_per_ip - seq) as u64);
 
             return;
         }
@@ -205,17 +304,26 @@ impl Job {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let _ = env_logger::builder()
-        .format_timestamp_millis()
+    // initialize the logger implementation
+    env_logger::builder()
+        .format_timestamp(None)
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    // try to load a dotenv file and ignore the case where none is found
-    let _ = dotenv::dotenv();
+    // try to load a dotenv file
+    match dotenv::dotenv() {
+        Ok(path) => log::info!(
+            "loaded .env file from {}",
+            path.to_str().unwrap_or_default()
+        ),
+        Err(err) => log::warn!("couldn't load .env file: {}", err),
+    };
+
+    let config = Config::from_env().context("load config from environment variables")?;
 
     let client =
         surge_ping::Client::new(&surge_ping::Config::default()).context("create ping client")?;
-    let mut hosts = get_hostnames().await.context("get ping targets")?;
+    let mut hosts = get_hostnames(&config).await.context("get ping targets")?;
 
     let stats = Stats::from_durations(hosts.iter().map(|host| host.duration));
     log::info!(
@@ -238,12 +346,10 @@ async fn main() -> anyhow::Result<()> {
     jobs.shuffle(&mut rand::thread_rng());
 
     // ping each ip a few times and collect the rtt
-    let bar = util::styled_progress_bar((jobs.len() * DEFAULT_PING_COUNT) as u64, "Ping IPs");
-    let concurrent_pings =
-        util::env_var_parse("CONCURRENT_PINGS", Some(DEFAULT_CONCURRENT_PINGS)).unwrap();
+    let bar = util::styled_progress_bar((jobs.len() * config.pings_per_ip) as u64, "Ping IPs");
     let _ = futures::stream::iter(&mut jobs)
-        .map(|job| job.try_resolved_to_pinged(&bar))
-        .buffer_unordered(concurrent_pings)
+        .map(|job| job.try_resolved_to_pinged(&config, &bar))
+        .buffer_unordered(config.concurrent_pings)
         .collect::<Vec<()>>()
         .await;
     bar.finish_and_clear();
@@ -300,8 +406,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let archive_folder =
-        util::env_var_parse("CONFIG_FOLDER", Some(PathBuf::from(DEFAULT_CONFIG_FOLDER))).unwrap();
+    let archive_folder = PathBuf::from(config.config_folder.as_ref());
 
     // create the directory where the configs will be saved if it doesn't exist yet
     if !tokio::fs::metadata(&archive_folder)
@@ -342,7 +447,7 @@ async fn main() -> anyhow::Result<()> {
     let archive_options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-    // save the configs
+    // write the configs to the zip archive in memory
     for host in &hosts {
         let filename = format!(
             "cs-{:04}ms-{:02}ips-{}.conf",
@@ -354,9 +459,9 @@ async fn main() -> anyhow::Result<()> {
             host.hostname.strip_suffix(CRYPTOSTORM_SUFFIX).unwrap()
         );
 
-        let config = wireguard::Config::from_env(&host.hostname, &host.public_key)
-            .context("build wireguard config")?
-            .to_string();
+        let config = config
+            .wireguard
+            .make_config(&host.hostname, &host.public_key);
 
         archive_writer
             .start_file(&filename, archive_options)
@@ -371,8 +476,11 @@ async fn main() -> anyhow::Result<()> {
                 )
             })?;
     }
+    archive_writer
+        .finish()
+        .context("finish constructing the zip archive in memory")?;
 
-    archive_writer.finish().unwrap();
+    // we need to drop the archive writer because it mutably borrows the archive buffer
     drop(archive_writer);
 
     // write the zip archive to disk
@@ -380,6 +488,16 @@ async fn main() -> anyhow::Result<()> {
         .write_all(&archive_buffer)
         .await
         .context("write archive to disk")?;
+
+    log::info!(
+        "wrote configs to {}",
+        tokio::fs::canonicalize(&archive_path)
+            .await
+            .unwrap_or_else(|_| archive_path.clone())
+            .to_str()
+            .and_then(|path| path.strip_prefix(r#"\\?\"#))
+            .unwrap_or_default()
+    );
 
     Ok((/* 👍 */))
 }
