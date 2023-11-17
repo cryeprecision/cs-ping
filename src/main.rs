@@ -52,20 +52,32 @@ PersistentKeepalive = 25
 
 #[derive(Debug, Clone)]
 struct Config {
+    /// Where to download the script from. Servers and their corresponding public keys are
+    /// extracted from this file.
     script_url: Arc<str>,
+    /// How many concurrent DNS requests are made.
     concurrent_dns: usize,
+    /// How many concurrent pings are sent.
     concurrent_pings: usize,
+    /// How often each IP address is pinged.
     pings_per_ip: usize,
+    /// How often a ping to an IP address is retried if it fails.
     ping_retries: usize,
+    /// The folder where the config ZIP will be saved to.
     config_folder: Arc<str>,
+    /// WireGuard specific config for building the individual configs for each server.
     wireguard: WireguardConfig,
 }
 
 #[derive(Debug, Clone)]
 struct WireguardConfig {
+    /// Private key for the client.
     client_private_key: Arc<str>,
+    /// IP address for the client.
     client_address: Arc<str>,
+    /// Address of the DNS server WireGuard will use.
     client_dns: Arc<str>,
+    /// Preshared key with the WireGuard server.
     server_preshared_key: Arc<str>,
 }
 
@@ -261,15 +273,20 @@ impl Job {
             let error: anyhow::Error = loop {
                 match pinger.ping(PingSequence(seq as u16), &payload).await {
                     Ok((_, duration)) => {
+                        // ping succeeded
                         results.push(duration);
                         bar.inc(1);
 
+                        // done pinging
                         if results.len() == cfg.pings_per_ip {
                             break 'outer;
                         }
+                        // need more pings
                         continue 'outer;
                     }
+                    // ping failed but we still have retries left
                     Err(_) if ping_retries > 0 => ping_retries -= 1,
+                    // ping failed and we ran out of retries
                     Err(err) => break err.into(),
                 };
             };
