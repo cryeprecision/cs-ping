@@ -1,21 +1,31 @@
 # cs-ping
 
-Pings all server-locations extracted from this file [cryptostorm.is/wg_confgen.txt](https://cryptostorm.is/wg_confgen.txt)
+IP to ASN resolving is done through a [MaxMindDB](https://maxmind.github.io/MaxMind-DB/) file which can be downloaded [here](https://ipinfo.io/account/data-downloads) as 'Free IP to ASN'.
 
-## Currently hardcoded
+## Environment variables
 
-- `MAX_CONCURRENT_PINGS`
-  - Number of concurrent pings
-- `MAX_TIMEOUT_RETIRES`
-  - How often a ping to the same IP is allowed to time-out
-- `PING_COUNT`
-  - How many pings are used for statistics
+### Generated WireGuard configs
+
+- `CONFIG_CLIENT_ADDRESS`
+- `CONFIG_CLIENT_ALLOWED_IPS`
+- `CONFIG_CLIENT_DNS`
+- `CONFIG_CLIENT_PRIVATE_KEY`
+- `CONFIG_SERVER_PRESHARED_KEY`
+
+### App behaviour
+
+- `ASN_DB_PATH`
+- `CONCURRENT_DNS`
+- `CONCURRENT_PINGS`
+- `CONFIG_FOLDER`
+- `PING_RETRIES`
+- `PING_TIMEOUT_MS`
+- `PINGS_PER_IP`
 - `SCRIPT_URL`
-  - Link to `wg_confgen.txt`
 
 ## How to build
 
 1) Clone the repo
-2) `cd` into the root of the repo
-3) `cargo build --release`
-4) Binary will be in `./target/release/`
+2) `cd` into the cloned repo
+3) Run `cargo build --release`
+4) Binary will be in `target/release/`

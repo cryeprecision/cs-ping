@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -30,6 +30,7 @@ const DEFAULT_PINGS_PER_IP: usize = 5;
 const DEFAULT_PING_RETRIES: usize = 3;
 const DEFAULT_PING_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_CONFIG_FOLDER: &str = "./configs/";
+const DEFAULT_ASN_DB_PATH: &str = "./asn.mmdb";
 
 const TEMPLATE_CLIENT_PRIVATE_KEY: &str = "{{ PRIVATE_KEY }}";
 const TEMPLATE_CLIENT_ADDRESS: &str = "{{ ADDRESS }}";
@@ -53,6 +54,37 @@ AllowedIPs = {{ ALLOWED_IPS }}
 PersistentKeepalive = 25
 ";
 
+#[derive(serde::Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
+struct Asn {
+    asn: String,
+    domain: String,
+    name: String,
+}
+
+fn format_asn_set(asn_set: &HashSet<Asn>) -> String {
+    fn domain_name(input: &str) -> &str {
+        if let Some((_, domain_name)) = lazy_regex::regex_captures!(r#"([\w_\-]+)\.\w+$"#, input) {
+            domain_name
+        } else {
+            input
+        }
+    }
+
+    let mut asn_list = asn_set.iter().collect::<Vec<_>>();
+    asn_list.sort_unstable_by_key(|asn| asn.domain.as_str());
+
+    let mut buf = String::new();
+    let mut iter = asn_list.iter();
+    if let Some(asn) = iter.next() {
+        buf.push_str(domain_name(&asn.domain));
+        for asn in iter {
+            buf.push('-');
+            buf.push_str(domain_name(&asn.domain));
+        }
+    }
+    buf
+}
+
 #[derive(Debug, Clone)]
 struct Config {
     /// Where to download the script from. Servers and their corresponding public keys are
@@ -70,6 +102,8 @@ struct Config {
     ping_timeout: Duration,
     /// The folder where the config ZIP will be saved to.
     config_folder: Arc<str>,
+    /// Database to get ASN from IP
+    asn_db: Arc<[u8]>,
     /// WireGuard specific config for building the individual configs for each server.
     wireguard: WireguardConfig,
 }
@@ -129,7 +163,7 @@ impl WireguardConfig {
 
 impl Config {
     /// Try to load the config from environment variables
-    pub fn from_env() -> anyhow::Result<Config> {
+    pub async fn from_env() -> anyhow::Result<Config> {
         Ok(Config {
             script_url: util::env_var("SCRIPT_URL", Some(DEFAULT_SCRIPT_URL))
                 .context("env var SCRIPT_URL missing")?
@@ -152,6 +186,10 @@ impl Config {
             config_folder: util::env_var("CONFIG_FOLDER", Some(DEFAULT_CONFIG_FOLDER))
                 .context("env var CONFIG_FOLDER missing")?
                 .into(),
+            asn_db: util::env_var_read_file("ASN_DB_PATH", Some(DEFAULT_ASN_DB_PATH))
+                .await
+                .context("env var ASN_DB_PATH missing or couldn't read file")?
+                .into(),
             wireguard: WireguardConfig::from_env()?,
         })
     }
@@ -164,6 +202,7 @@ struct Host {
     ips_v4: Arc<[Ipv4Addr]>,
     duration: Duration,
     stats: Option<Stats>,
+    asn_set: Option<HashSet<Asn>>,
 }
 
 /// - Download the script file
@@ -223,6 +262,7 @@ async fn get_hostnames(cfg: &Config) -> anyhow::Result<Vec<Host>> {
                     ),
                     duration: elapsed,
                     stats: None,
+                    asn_set: None,
                 })
             }
         })
@@ -354,7 +394,9 @@ async fn main() -> anyhow::Result<()> {
         Err(err) => log::warn!("couldn't load .env file: {}", err),
     };
 
-    let config = Config::from_env().context("load config from environment variables")?;
+    let config = Config::from_env()
+        .await
+        .context("load config from environment variables")?;
 
     let client =
         surge_ping::Client::new(&surge_ping::Config::default()).context("create ping client")?;
@@ -389,7 +431,30 @@ async fn main() -> anyhow::Result<()> {
         .await;
     bar.finish_and_clear();
 
-    // collect the result of each ip into the corresponding hostname
+    // collect the asn names for each hostname
+    let mut asn_names = HashMap::<Arc<str>, HashSet<Asn>>::new();
+    let asn_db_reader = maxminddb::Reader::from_source(config.asn_db.as_ref())
+        .context("malformed asn database")
+        .unwrap();
+
+    jobs.iter().for_each(|job| {
+        if matches!(job.state, JobState::Err { .. }) {
+            return;
+        }
+
+        let asn: Asn = asn_db_reader
+            .lookup(job.ip.into())
+            .context("couldn't find ip address in database")
+            .unwrap();
+
+        asn_names
+            .entry(job.host.hostname.clone())
+            .or_default()
+            .insert(asn);
+    });
+    drop(asn_db_reader);
+
+    // collect the stats of each ip into the corresponding hostname
     let mut durations = HashMap::<Arc<str>, Vec<Duration>>::new();
     jobs.into_iter().for_each(|job| {
         // if there was an error, print it
@@ -420,6 +485,14 @@ async fn main() -> anyhow::Result<()> {
         };
     });
 
+    // add the asn set to the corresponding host
+    hosts.iter_mut().for_each(|host| {
+        match asn_names.remove_entry(&host.hostname) {
+            None => (),
+            Some((_, asn_set)) => host.asn_set = Some(asn_set),
+        };
+    });
+
     // sort ascending by average latency putting unreachable servers at the top
     hosts.sort_unstable_by(|lhs, rhs| match (lhs.stats.as_ref(), rhs.stats.as_ref()) {
         (Some(lhs), Some(rhs)) => lhs.average.total_cmp(&rhs.average),
@@ -432,10 +505,11 @@ async fn main() -> anyhow::Result<()> {
     for host in &hosts {
         match &host.stats {
             Some(stats) => log::info!(
-                "{:>25} ({:>2} IPs): {}",
+                "{:>25} ({:>2} IPs): {} (ASN: {:?})",
                 host.hostname,
                 host.ips_v4.len(),
-                stats.format_millis()
+                stats.format_millis(),
+                host.asn_set.as_ref().unwrap(),
             ),
             None => log::info!("{:>25} ({:>2} IPs):", host.hostname, host.ips_v4.len()),
         }
@@ -484,14 +558,19 @@ async fn main() -> anyhow::Result<()> {
 
     // write the configs to the zip archive in memory
     for host in &hosts {
+        let asn_formatted = match host.asn_set.as_ref() {
+            Some(asn_set) => util::trim_string(format_asn_set(asn_set), 7),
+            None => "unknown".to_string(),
+        };
         let filename = format!(
-            "cs-{:04}ms-{:02}ips-{}.conf",
+            "cs-{:04}ms-{}-{}-{:02}ips.conf",
             host.stats
                 .as_ref()
                 .map(|stats| (stats.average * 1e3).round() as u64)
                 .unwrap_or(9999),
+            util::trim_str(host.hostname.strip_suffix(CRYPTOSTORM_SUFFIX).unwrap(), 8),
+            &asn_formatted,
             host.ips_v4.len(),
-            host.hostname.strip_suffix(CRYPTOSTORM_SUFFIX).unwrap()
         );
 
         let config = config

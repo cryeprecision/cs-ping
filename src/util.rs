@@ -36,9 +36,31 @@ pub fn env_var_parse<T: FromStr>(key: &str, default: Option<T>) -> Option<T> {
     str.parse().ok().or(default)
 }
 
+/// Load the environment variable and try to read the file it points to
+pub async fn env_var_read_file(key: &str, default: Option<&str>) -> Option<Vec<u8>> {
+    let path = std::env::var(key)
+        .ok()
+        .or_else(|| default.map(String::from))?;
+    tokio::fs::read(path).await.ok()
+}
+
 pub fn replace_all(mut string: String, from_to: &[(&str, &str)]) -> String {
     from_to.iter().for_each(|&(from, to)| {
         string = string.replace(from, to);
     });
     string
+}
+
+pub fn trim_string(mut input: String, max_chars: usize) -> String {
+    if let Some((byte_idx, _)) = input.char_indices().nth(max_chars) {
+        input.truncate(byte_idx);
+    }
+    input
+}
+
+pub fn trim_str(mut input: &str, max_chars: usize) -> &str {
+    if let Some((byte_idx, _)) = input.char_indices().nth(max_chars) {
+        input = &input[..byte_idx];
+    }
+    input
 }
