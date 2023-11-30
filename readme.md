@@ -29,3 +29,7 @@ IP to ASN resolving is done through a [MaxMindDB](https://maxmind.github.io/MaxM
 2) `cd` into the cloned repo
 3) Run `cargo build --release`
 4) Binary will be in `target/release/`
+
+## Contributing
+
+Fork the repo, change some stuff, make sure everything still works, fix any clippy lints (run `cargo clippy`) and submit a PR.
