@@ -21,17 +21,20 @@ use crate::stats::Stats;
 mod stats;
 mod util;
 
+const CRYPTOSTORM_SUFFIX: &str = ".cstorm.is";
+
 const DEFAULT_SCRIPT_URL: &str = "https://cryptostorm.is/wg_confgen.txt";
 const DEFAULT_CONCURRENT_DNS: usize = 1;
 const DEFAULT_CONCURRENT_PINGS: usize = 5;
 const DEFAULT_PINGS_PER_IP: usize = 5;
 const DEFAULT_PING_RETRIES: usize = 3;
+const DEFAULT_PING_TIMEOUT_MS: u64 = 2000;
 const DEFAULT_CONFIG_FOLDER: &str = "./configs/";
-const CRYPTOSTORM_SUFFIX: &str = ".cstorm.is";
 
 const TEMPLATE_CLIENT_PRIVATE_KEY: &str = "{{ PRIVATE_KEY }}";
 const TEMPLATE_CLIENT_ADDRESS: &str = "{{ ADDRESS }}";
 const TEMPLATE_CLIENT_DNS: &str = "{{ DNS }}";
+const TEMPLATE_CLIENT_ALLOWED_IPS: &str = "{{ ALLOWED_IPS }}";
 const TEMPLATE_SERVER_PRESHARED_KEY: &str = "{{ PRESHARED_KEY }}";
 const TEMPLATE_SERVER_PUBLIC_KEY: &str = "{{ PUBLIC_KEY }}";
 const TEMPLATE_SERVER_ENDPOINT: &str = "{{ ENDPOINT }}";
@@ -46,7 +49,7 @@ DNS = {{ DNS }}
 Presharedkey = {{ PRESHARED_KEY }}
 PublicKey = {{ PUBLIC_KEY }}
 Endpoint = {{ ENDPOINT }}
-AllowedIPs = 0.0.0.0/0
+AllowedIPs = {{ ALLOWED_IPS }}
 PersistentKeepalive = 25
 ";
 
@@ -63,6 +66,8 @@ struct Config {
     pings_per_ip: usize,
     /// How often a ping to an IP address is retried if it fails.
     ping_retries: usize,
+    /// Timeout of each ping.
+    ping_timeout: Duration,
     /// The folder where the config ZIP will be saved to.
     config_folder: Arc<str>,
     /// WireGuard specific config for building the individual configs for each server.
@@ -77,6 +82,8 @@ struct WireguardConfig {
     client_address: Arc<str>,
     /// Address of the DNS server WireGuard will use.
     client_dns: Arc<str>,
+    /// List of subnets that will be routed through the tunnel.
+    client_allowed_ips: Arc<str>,
     /// Preshared key with the WireGuard server.
     server_preshared_key: Arc<str>,
 }
@@ -94,6 +101,9 @@ impl WireguardConfig {
             client_dns: util::env_var("CONFIG_CLIENT_DNS", None)
                 .context("env var CONFIG_CLIENT_DNS missing")?
                 .into(),
+            client_allowed_ips: util::env_var("CONFIG_CLIENT_ALLOWED_IPS", None)
+                .context("env var CONFIG_CLIENT_ALLOWED_IPS missing")?
+                .into(),
             server_preshared_key: util::env_var("CONFIG_SERVER_PRESHARED_KEY", None)
                 .context("env var CONFIG_SERVER_PRESHARED_KEY missing")?
                 .into(),
@@ -108,6 +118,7 @@ impl WireguardConfig {
                 (TEMPLATE_CLIENT_PRIVATE_KEY, &self.client_private_key),
                 (TEMPLATE_CLIENT_ADDRESS, &self.client_address),
                 (TEMPLATE_CLIENT_DNS, &self.client_dns),
+                (TEMPLATE_CLIENT_ALLOWED_IPS, &self.client_allowed_ips),
                 (TEMPLATE_SERVER_PRESHARED_KEY, &self.server_preshared_key),
                 (TEMPLATE_SERVER_PUBLIC_KEY, server_public_key),
                 (TEMPLATE_SERVER_ENDPOINT, server_endpoint),
@@ -134,6 +145,10 @@ impl Config {
                 .context("env var PINGS_PER_IP missing")?,
             ping_retries: util::env_var_parse("PING_RETRIES", Some(DEFAULT_PING_RETRIES))
                 .context("env var PING_RETRIES missing")?,
+            ping_timeout: Duration::from_millis(
+                util::env_var_parse("PING_TIMEOUT_MS", Some(DEFAULT_PING_TIMEOUT_MS))
+                    .context("env var PING_TIMEOUT_MS missing")?,
+            ),
             config_folder: util::env_var("CONFIG_FOLDER", Some(DEFAULT_CONFIG_FOLDER))
                 .context("env var CONFIG_FOLDER missing")?
                 .into(),
@@ -262,6 +277,9 @@ impl Job {
         let mut pinger = client
             .pinger(self.ip.into(), PingIdentifier(rand::thread_rng().gen()))
             .await;
+
+        // set the timeout
+        pinger.timeout(cfg.ping_timeout);
 
         let payload = [0u8; 32];
         let mut results = Vec::new();
@@ -478,7 +496,7 @@ async fn main() -> anyhow::Result<()> {
 
         let config = config
             .wireguard
-            .make_config(&host.hostname, &host.public_key);
+            .make_config(&format!("{}:443", host.hostname), &host.public_key);
 
         archive_writer
             .start_file(&filename, archive_options)
@@ -493,6 +511,7 @@ async fn main() -> anyhow::Result<()> {
                 )
             })?;
     }
+
     archive_writer
         .finish()
         .context("finish constructing the zip archive in memory")?;
