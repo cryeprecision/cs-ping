@@ -40,7 +40,6 @@ impl RunningStats {
             standard_dev: ((self.sum_of_squares - sq_sum_avg) / (self.samples - 1) as f64).sqrt(),
             minimum: self.minimum,
             maximum: self.maximum,
-            samples: self.samples,
         })
     }
 }
@@ -51,7 +50,6 @@ pub struct Stats {
     pub standard_dev: f64,
     pub minimum: f64,
     pub maximum: f64,
-    pub samples: usize,
 }
 
 impl Stats {

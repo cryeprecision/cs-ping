@@ -339,6 +339,7 @@ impl Job {
                         if results.len() == cfg.pings_per_ip {
                             break 'outer;
                         }
+
                         // need more pings
                         continue 'outer;
                     }
