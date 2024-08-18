@@ -11,12 +11,12 @@ trust-dns-resolver = { version = "0", features = ["dns-over-rustls"] }
 futures = { version = "0" }
 rand = { version = "0" }
 indicatif = { version = "0" }
-lazy-regex = { version = "2" }
+lazy-regex = { version = "3" }
 anyhow = { version = "1" }
 log = { version = "0", features = ["release_max_level_info"] }
 env_logger = { version = "0" }
 dotenv = { version = "0" }
-zip = { version = "0", default-features = false }
+zip = { version = "2", default-features = false }
 chrono = { version = "0" }
 maxminddb = { version = "0" }
 serde = { version = "1", features = ["derive"] }

@@ -555,7 +555,7 @@ async fn main() -> anyhow::Result<()> {
     let mut archive_buffer = Vec::<u8>::with_capacity(4096);
     let mut archive_writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive_buffer));
     let archive_options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     // write the configs to the zip archive in memory
     for host in &hosts {
@@ -595,9 +595,6 @@ async fn main() -> anyhow::Result<()> {
     archive_writer
         .finish()
         .context("finish constructing the zip archive in memory")?;
-
-    // we need to drop the archive writer because it mutably borrows the archive buffer
-    drop(archive_writer);
 
     // write the zip archive to disk
     archive_file
