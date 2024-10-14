@@ -1,50 +1,18 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use context::{Config, Context};
-use serde::Deserialize;
 
 mod context;
 mod ping;
 mod stats;
 mod util;
+mod zip;
 
 const CRYPTOSTORM_SUFFIX: &str = ".cstorm.is";
-
-#[derive(Deserialize, Debug, Clone, Hash, PartialEq, Eq)]
-struct Asn {
-    asn: String,
-    domain: String,
-    name: String,
-}
-
-fn format_asn_set(asn_set: &HashSet<Asn>) -> String {
-    fn domain_name(input: &str) -> &str {
-        if let Some((_, domain_name)) = lazy_regex::regex_captures!(r#"([\w_\-]+)\.\w+$"#, input) {
-            domain_name
-        } else {
-            input
-        }
-    }
-
-    let mut asn_list = asn_set.iter().collect::<Vec<_>>();
-    asn_list.sort_unstable_by_key(|asn| asn.domain.as_str());
-
-    let mut buf = String::new();
-    let mut iter = asn_list.iter();
-    if let Some(asn) = iter.next() {
-        buf.push_str(domain_name(&asn.domain));
-        for asn in iter {
-            buf.push('-');
-            buf.push_str(domain_name(&asn.domain));
-        }
-    }
-    buf
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Host {
@@ -94,8 +62,8 @@ async fn main() -> anyhow::Result<()> {
     let results = ping::ping_all_ips(Arc::clone(&ctx), &hosts).await?;
     for result in results {
         let location = result.host.location.as_str();
-        let stats = result.average_stats();
-        log::info!("{:^25}: {}", location, stats.format_millis());
+        let stats = result.stats();
+        log::info!("[{:^25}] {}", location, stats.format_millis());
     }
 
     // println!("{:#?}", results);

@@ -1,16 +1,15 @@
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
 use chrono::{TimeZone as _, Utc};
 use maxminddb::Reader;
-use rand::Rng as _;
 use reqwest::tls;
 use serde::{Deserialize, Deserializer};
 use surge_ping::{PingIdentifier, PingSequence};
-use tokio::sync::Semaphore;
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::{Name, TokioAsyncResolver};
 
@@ -18,9 +17,8 @@ pub struct Context {
     pub resolver: TokioAsyncResolver,
     pub reqwest: reqwest::Client,
     pub surge_ping: surge_ping::Client,
-    pub ping_sem: Semaphore,
-    pub dns_sem: Semaphore,
     pub config: Config,
+    pub next_ping_id: AtomicU16,
 }
 
 impl Context {
@@ -36,9 +34,8 @@ impl Context {
                 .context("create reqwest client")?,
             surge_ping: surge_ping::Client::new(&surge_ping::Config::new())
                 .context("create surge_ping client")?,
-            ping_sem: Semaphore::new(config.concurrent_pings),
-            dns_sem: Semaphore::new(config.concurrent_dns),
             config,
+            next_ping_id: AtomicU16::new(0),
         })
     }
 
@@ -60,12 +57,6 @@ impl Context {
         let name = Name::from_utf8(hostname)
             .with_context(|| format!("convert host {} to a name", hostname))?;
 
-        let _ = self
-            .dns_sem
-            .acquire()
-            .await
-            .context("acquire DNS semaphore")?;
-
         self.resolver
             .ipv4_lookup(name)
             .await
@@ -74,30 +65,25 @@ impl Context {
     }
 
     pub async fn ping_ip(&self, ip: Ipv4Addr) -> anyhow::Result<Vec<Duration>> {
+        let ping_id = self.next_ping_id.fetch_add(1, Ordering::Relaxed);
         let mut pinger = self
             .surge_ping
-            .pinger(ip.into(), PingIdentifier(rand::thread_rng().gen()))
+            .pinger(ip.into(), PingIdentifier(ping_id))
             .await;
 
         // set the timeout
         pinger.timeout(self.config.ping_timeout);
 
-        let _ = self
-            .ping_sem
-            .acquire()
-            .await
-            .context("acquire ping semaphore")?;
-
         let payload = [0u8; 56];
         let mut results = Vec::with_capacity(self.config.pings_per_ip);
-
         let mut retries = 0;
         while results.len() < self.config.pings_per_ip && retries <= self.config.ping_retries {
-            let seq = PingSequence((results.len() % u16::MAX as usize) as u16);
+            let seq = PingSequence(((results.len() + retries) % u16::MAX as usize) as u16);
             match pinger.ping(seq, &payload).await {
                 Ok((_, duration)) => results.push(duration),
                 Err(_) => retries += 1,
             };
+            tokio::task::yield_now().await;
         }
 
         anyhow::ensure!(results.len() == self.config.pings_per_ip, "out of retries");

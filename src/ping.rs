@@ -1,3 +1,13 @@
+//! Module for pinging hosts and collecting statistics.
+//!
+//! ## How It Works
+//!
+//! - [`Job::from_hosts`] resolves the hostnames into IPs and creates a [`Job`] for each IP.
+//! - The vector of [`Jobs`](Job) is shuffled to randomize the order in which the IPs are pinged.
+//! - [`Job::execute_jobs`] pings the IPs concurrently and collects the results.
+//! - [`HostStats::collect_results`] groups the results by hostname and calculates the statistics.
+//! - The statistics are sorted by average RTT and returned.
+
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -91,7 +101,7 @@ impl Job {
 pub struct HostStats {
     pub host: Arc<Host>,
     pub ips: Vec<Ipv4Addr>,
-    pub ip_stats: HashMap<Ipv4Addr, Stats>,
+    pub durations: HashMap<Ipv4Addr, Vec<Duration>>,
 }
 
 impl HostStats {
@@ -108,25 +118,21 @@ impl HostStats {
         let mut results = hosts
             .iter()
             .filter_map(|host| {
-                let host_ips = jobs
+                let ips = jobs
                     .iter()
                     .filter_map(|job| (ip_to_host.get(&job.ip) == Some(host)).then_some(job.ip))
                     .collect::<Vec<_>>();
 
-                let durations = host_ips
+                let durations = ips
                     .iter()
-                    .filter_map(|&ip| {
-                        let durations = results.get(&ip)?;
-                        let stats = Stats::from_durations(durations.iter().copied())?;
-                        Some((ip, stats))
-                    })
+                    .filter_map(|&ip| Some((ip, results.get(&ip)?.clone())))
                     .collect::<HashMap<_, _>>();
 
-                if host_ips.len() != durations.len() {
+                if ips.len() != durations.len() {
                     log::warn!(
                         "{}/{} ips unreachable for {}",
-                        host_ips.len() - durations.len(),
-                        host_ips.len(),
+                        ips.len() - durations.len(),
+                        ips.len(),
                         host.location.as_str(),
                     );
                     return None;
@@ -134,8 +140,8 @@ impl HostStats {
 
                 Some(Self {
                     host: Arc::clone(host),
-                    ips: host_ips,
-                    ip_stats: durations,
+                    ips,
+                    durations,
                 })
             })
             .collect::<Vec<_>>();
@@ -144,39 +150,33 @@ impl HostStats {
         results
     }
 
-    fn average_rtt_secs(&self) -> f64 {
+    pub fn average_rtt_secs(&self) -> f64 {
         assert!(
-            !self.ip_stats.is_empty(),
-            "no stats for {}",
-            self.host.location.as_str()
+            !self.durations.is_empty(),
+            "no durations for any ip of {}",
+            self.host.location
         );
-        let sum = self
-            .ip_stats
-            .values()
-            .map(|stats| stats.average)
-            .sum::<f64>();
-        let count = self.ip_stats.len() as f64;
 
-        sum / count
+        let (sum, count) = self
+            .durations
+            .values()
+            .fold((0.0, 0), |(sum, count), next| {
+                (
+                    sum + next.iter().map(Duration::as_secs_f64).sum::<f64>(),
+                    count + next.len(),
+                )
+            });
+
+        sum / (count as f64)
     }
 
-    pub fn average_stats(&self) -> Stats {
+    pub fn stats(&self) -> Stats {
         assert!(
-            !self.ip_stats.is_empty(),
-            "no stats for {}",
-            self.host.location.as_str()
+            !self.durations.is_empty(),
+            "no durations for any ip of {}",
+            self.host.location
         );
-
-        if self.ip_stats.len() == 1 {
-            return self.ip_stats.values().next().unwrap().clone();
-        }
-
-        Stats::from_durations(
-            self.ip_stats
-                .values()
-                .map(|stats| Duration::from_secs_f64(stats.average)),
-        )
-        .unwrap()
+        Stats::from_durations(self.durations.values().flatten().copied()).unwrap()
     }
 }
 
