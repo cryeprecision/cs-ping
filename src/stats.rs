@@ -57,8 +57,8 @@ impl Stats {
     pub fn format_seconds(&self) -> PrintStatsSeconds {
         PrintStatsSeconds { stats: self }
     }
-    pub fn format_millis(&self) -> PrintStatsMilliseconds {
-        PrintStatsMilliseconds { stats: self }
+    pub fn format_millis(&self) -> PrintStatsMillis {
+        PrintStatsMillis { stats: self }
     }
     pub fn from_durations<I>(durations: I) -> Option<Stats>
     where
@@ -83,10 +83,10 @@ impl<'a> Display for PrintStatsSeconds<'a> {
     }
 }
 
-pub struct PrintStatsMilliseconds<'a> {
+pub struct PrintStatsMillis<'a> {
     stats: &'a Stats,
 }
-impl<'a> Display for PrintStatsMilliseconds<'a> {
+impl<'a> Display for PrintStatsMillis<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

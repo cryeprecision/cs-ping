@@ -2,3 +2,6 @@
 /configs/
 /.env
 /asn.mmdb
+/config.json
+/privatekey
+/publickey

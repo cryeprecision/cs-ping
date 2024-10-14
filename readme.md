@@ -2,17 +2,12 @@
 
 IP to ASN resolving is done through a [MaxMindDB](https://maxmind.github.io/MaxMind-DB/) file which can be downloaded [here](https://ipinfo.io/account/data-downloads) as 'Free IP to ASN'.
 
-## Environment variables
+## App behaviour
 
-### Generated WireGuard configs
+- Fetch the list of servers from the script
+- Resolve each hostname into a list of IPs
 
-- `CONFIG_CLIENT_ADDRESS`
-- `CONFIG_CLIENT_ALLOWED_IPS`
-- `CONFIG_CLIENT_DNS`
-- `CONFIG_CLIENT_PRIVATE_KEY`
-- `CONFIG_SERVER_PRESHARED_KEY`
-
-### App behaviour
+### Step 1:
 
 - `ASN_DB_PATH`: Path to the `asn.mmdb` file
 - `CONCURRENT_DNS`: How many DNS queries are run concurrently

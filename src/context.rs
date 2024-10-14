@@ -1,0 +1,253 @@
+use std::fmt::Write as _;
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::Context as _;
+use chrono::{DateTime, Local, TimeZone as _, Utc};
+use maxminddb::Reader;
+use rand::Rng as _;
+use reqwest::tls;
+use serde::{Deserialize, Deserializer};
+use surge_ping::{PingIdentifier, PingSequence};
+use tokio::sync::Semaphore;
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
+use trust_dns_resolver::{Name, TokioAsyncResolver};
+
+pub struct Context {
+    pub resolver: TokioAsyncResolver,
+    pub reqwest: reqwest::Client,
+    pub surge_ping: surge_ping::Client,
+    pub ping_sem: Semaphore,
+    pub dns_sem: Semaphore,
+    pub config: Config,
+}
+
+impl Context {
+    pub fn new(config: Config) -> anyhow::Result<Context> {
+        Ok(Context {
+            resolver: TokioAsyncResolver::tokio(
+                ResolverConfig::cloudflare_tls(),
+                ResolverOpts::default(),
+            ),
+            reqwest: reqwest::Client::builder()
+                .min_tls_version(tls::Version::TLS_1_2)
+                .build()
+                .context("create reqwest client")?,
+            surge_ping: surge_ping::Client::new(&surge_ping::Config::new())
+                .context("create surge_ping client")?,
+            ping_sem: Semaphore::new(config.concurrent_pings),
+            dns_sem: Semaphore::new(config.concurrent_dns),
+            config,
+        })
+    }
+
+    pub async fn download_confgen(&self) -> anyhow::Result<String> {
+        let script_url = self.config.script_url.as_str();
+        self.reqwest
+            .get(script_url)
+            .send()
+            .await
+            .with_context(|| format!("download script from {}", script_url))?
+            .error_for_status()
+            .with_context(|| format!("unexpected status code from {}", script_url))?
+            .text()
+            .await
+            .with_context(|| format!("read script from {}", script_url))
+    }
+
+    pub async fn resolve_hostname(&self, hostname: &str) -> anyhow::Result<Vec<Ipv4Addr>> {
+        let name = Name::from_utf8(hostname)
+            .with_context(|| format!("convert host {} to a name", hostname))?;
+
+        let _ = self
+            .dns_sem
+            .acquire()
+            .await
+            .context("acquire DNS semaphore")?;
+
+        self.resolver
+            .ipv4_lookup(name)
+            .await
+            .with_context(|| format!("resolve ip of {}", hostname))
+            .map(|ips| ips.into_iter().map(Ipv4Addr::from).collect::<Vec<_>>())
+    }
+
+    pub async fn ping_ip(&self, ip: Ipv4Addr) -> anyhow::Result<Vec<Duration>> {
+        let mut pinger = self
+            .surge_ping
+            .pinger(ip.into(), PingIdentifier(rand::thread_rng().gen()))
+            .await;
+
+        // set the timeout
+        pinger.timeout(self.config.ping_timeout);
+
+        let _ = self
+            .ping_sem
+            .acquire()
+            .await
+            .context("acquire ping semaphore")?;
+
+        let payload = [0u8; 56];
+        let mut results = Vec::with_capacity(self.config.pings_per_ip);
+
+        let mut retries = 0;
+        while results.len() < self.config.pings_per_ip && retries <= self.config.ping_retries {
+            let seq = PingSequence((results.len() % u16::MAX as usize) as u16);
+            match pinger.ping(seq, &payload).await {
+                Ok((_, duration)) => results.push(duration),
+                Err(_) => retries += 1,
+            };
+        }
+
+        anyhow::ensure!(results.len() == self.config.pings_per_ip, "out of retries");
+        Ok(results)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    /// Where to download the script from. Servers and their corresponding public keys are
+    /// extracted from this file.
+    pub script_url: String,
+    /// How many concurrent DNS requests are made.
+    pub concurrent_dns: usize,
+    /// How many concurrent pings are sent.
+    pub concurrent_pings: usize,
+    /// How often each IP address is pinged.
+    pub pings_per_ip: usize,
+    /// How often a ping to an IP address is retried if it fails.
+    pub ping_retries: usize,
+    /// Timeout of each ping.
+    #[serde(deserialize_with = "Config::deserialize_duration_ms")]
+    #[serde(rename = "ping_timeout_ms")]
+    pub ping_timeout: Duration,
+    /// The folder where the config ZIP will be saved to.
+    pub config_folder: PathBuf,
+    /// Database to get ASN from IP
+    #[serde(deserialize_with = "Config::deserialize_mmdb")]
+    #[serde(rename = "asn_db_path")]
+    pub asn_mmdb: Option<Reader<Vec<u8>>>,
+    /// WireGuard specific config for building the individual configs for each server.
+    pub wireguard: WireguardConfig,
+}
+
+impl Config {
+    fn deserialize_mmdb<'de, D>(deserializer: D) -> Result<Option<Reader<Vec<u8>>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(path) = Option::<PathBuf>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+
+        let content = std::fs::read(&path)
+            .with_context(|| format!("read mmdb file at {}", path.display()))
+            .map_err(|err| serde::de::Error::custom(err))?;
+
+        let reader = Reader::from_source(content)
+            .context("create mmdb reader")
+            .map_err(|err| serde::de::Error::custom(err))?;
+
+        let build_epoch = i64::try_from(reader.metadata.build_epoch)
+            .context("convert build epoch to i64")
+            .map_err(|err| serde::de::Error::custom(err))?;
+        let build_date = Utc
+            .timestamp_opt(build_epoch, 0)
+            .earliest()
+            .context("convert build epoch to date")
+            .map_err(|err| serde::de::Error::custom(err))?;
+
+        let mmdb_age = Utc::now() - build_date;
+        if mmdb_age > chrono::Duration::days(30) {
+            log::warn!(
+                "mmdb file is older than 30 days ({}), consider updating it",
+                mmdb_age
+            );
+        }
+
+        Ok(Some(reader))
+    }
+
+    fn deserialize_duration_ms<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let ms = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(ms))
+    }
+
+    pub fn read(path: &Path) -> anyhow::Result<Config> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .with_context(|| format!("open config file at {}", path.display()))?;
+
+        let reader = std::io::BufReader::new(file);
+        let config = serde_json::from_reader(reader).context("parse config file")?;
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct WireguardConfig {
+    /// Private key for the client.
+    pub client_private_key: String,
+    /// IP address for the client.
+    pub client_address: String,
+    /// Address of the DNS server WireGuard will use.
+    pub client_dns: String,
+    /// List of subnets that will be routed through the tunnel.
+    pub client_allowed_ips: String,
+    /// Preshared key with the WireGuard server.
+    pub server_preshared_key: Option<String>,
+    /// Commands executed before the interface is brought up.
+    pub pre_up: Vec<String>,
+    /// Commands executed after the interface is brought up.
+    pub post_up: Vec<String>,
+    /// Commands executed before the interface is brought down.
+    pub pre_down: Vec<String>,
+    /// Commands executed after the interface is brought down.
+    pub post_down: Vec<String>,
+    /// Persistent keepalive
+    pub persistent_keepalive: Option<String>,
+}
+
+impl WireguardConfig {
+    /// Create a WireGuard configuration file
+    pub fn make_config(&self, server_endpoint: &str, server_public_key: &str) -> String {
+        let mut buffer = String::new();
+
+        writeln!(buffer, "[Interface]").unwrap();
+        writeln!(buffer, "PrivateKey = {}", self.client_private_key).unwrap();
+        writeln!(buffer, "Address = {}", self.client_address).unwrap();
+        writeln!(buffer, "DNS = {}", self.client_dns).unwrap();
+
+        for pre_up in &self.pre_up {
+            writeln!(buffer, "PreUp = {}", pre_up).unwrap();
+        }
+        for post_up in &self.post_up {
+            writeln!(buffer, "PostUp = {}", post_up).unwrap();
+        }
+        for pre_down in &self.pre_down {
+            writeln!(buffer, "PreDown = {}", pre_down).unwrap();
+        }
+        for post_down in &self.post_down {
+            writeln!(buffer, "PostDown = {}", post_down).unwrap();
+        }
+
+        writeln!(buffer).unwrap();
+        writeln!(buffer, "[Peer]").unwrap();
+        writeln!(buffer, "PublicKey = {}", server_public_key).unwrap();
+        writeln!(buffer, "Endpoint = {}", server_endpoint).unwrap();
+        if let Some(preshared_key) = &self.server_preshared_key {
+            writeln!(buffer, "PresharedKey = {}", preshared_key).unwrap();
+        }
+        if let Some(persistent_keepalive) = &self.persistent_keepalive {
+            writeln!(buffer, "PersistentKeepalive = {}", persistent_keepalive).unwrap();
+        }
+        writeln!(buffer, "AllowedIPs = {}", self.client_allowed_ips).unwrap();
+
+        buffer
+    }
+}
