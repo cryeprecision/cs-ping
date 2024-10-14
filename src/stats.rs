@@ -73,7 +73,7 @@ impl Stats {
 pub struct PrintStatsSeconds<'a> {
     stats: &'a Stats,
 }
-impl<'a> Display for PrintStatsSeconds<'a> {
+impl Display for PrintStatsSeconds<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -86,7 +86,7 @@ impl<'a> Display for PrintStatsSeconds<'a> {
 pub struct PrintStatsMillis<'a> {
     stats: &'a Stats,
 }
-impl<'a> Display for PrintStatsMillis<'a> {
+impl Display for PrintStatsMillis<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

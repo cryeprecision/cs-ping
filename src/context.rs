@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use chrono::{DateTime, Local, TimeZone as _, Utc};
+use chrono::{TimeZone as _, Utc};
 use maxminddb::Reader;
 use rand::Rng as _;
 use reqwest::tls;
@@ -143,20 +143,20 @@ impl Config {
 
         let content = std::fs::read(&path)
             .with_context(|| format!("read mmdb file at {}", path.display()))
-            .map_err(|err| serde::de::Error::custom(err))?;
+            .map_err(serde::de::Error::custom)?;
 
         let reader = Reader::from_source(content)
             .context("create mmdb reader")
-            .map_err(|err| serde::de::Error::custom(err))?;
+            .map_err(serde::de::Error::custom)?;
 
         let build_epoch = i64::try_from(reader.metadata.build_epoch)
             .context("convert build epoch to i64")
-            .map_err(|err| serde::de::Error::custom(err))?;
+            .map_err(serde::de::Error::custom)?;
         let build_date = Utc
             .timestamp_opt(build_epoch, 0)
             .earliest()
             .context("convert build epoch to date")
-            .map_err(|err| serde::de::Error::custom(err))?;
+            .map_err(serde::de::Error::custom)?;
 
         let mmdb_age = Utc::now() - build_date;
         if mmdb_age > chrono::Duration::days(30) {

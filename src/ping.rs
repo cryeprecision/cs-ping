@@ -1,22 +1,14 @@
-use std::cmp::{Ordering, Reverse};
-use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
+use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::Context as _;
-use futures::{future, stream, StreamExt};
+use futures::{stream, StreamExt};
 use indicatif::ProgressBar;
-use parking_lot::Mutex;
 use rand::seq::SliceRandom as _;
-use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::{Name, TokioAsyncResolver};
 
-use crate::context::{Config, Context};
+use crate::context::Context;
 use crate::stats::Stats;
 use crate::{util, Host};
 
@@ -38,7 +30,7 @@ impl Job {
 
         let mut jobs = Vec::with_capacity(hosts.len());
         let mut iter = stream::iter(hosts)
-            .map(|host| from_host(Arc::clone(&host), Arc::clone(&ctx)))
+            .map(|host| from_host(Arc::clone(host), Arc::clone(&ctx)))
             .buffer_unordered(ctx.config.concurrent_dns);
 
         while let Some((host, result)) = iter.next().await {
@@ -154,7 +146,7 @@ impl HostStats {
 
     fn average_rtt_secs(&self) -> f64 {
         assert!(
-            self.ip_stats.len() > 0,
+            !self.ip_stats.is_empty(),
             "no stats for {}",
             self.host.location.as_str()
         );
@@ -170,7 +162,7 @@ impl HostStats {
 
     pub fn average_stats(&self) -> Stats {
         assert!(
-            self.ip_stats.len() > 0,
+            !self.ip_stats.is_empty(),
             "no stats for {}",
             self.host.location.as_str()
         );

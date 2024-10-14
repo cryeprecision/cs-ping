@@ -1,23 +1,12 @@
-use std::cmp::{self, Ordering};
-use std::collections::{HashMap, HashSet};
-use std::io::Write as _;
-use std::net::Ipv4Addr;
-use std::path::{Path, PathBuf};
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use context::{Config, Context};
-use futures::{future, stream, StreamExt};
-use indicatif::ProgressBar;
-use parking_lot::Mutex;
-use rand::seq::SliceRandom as _;
 use serde::Deserialize;
-use tokio::io::AsyncWriteExt;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::{Name, TokioAsyncResolver};
-
-use crate::stats::Stats;
 
 mod context;
 mod ping;
@@ -67,7 +56,7 @@ impl Host {
     pub fn from_confgen(confgen: &str) -> Vec<Arc<Self>> {
         // extract hostnames and corresponding public keys from the txt file
         lazy_regex::regex!(r#"(?m)^"(\w+):(.*?)"$"#)
-            .captures_iter(&confgen)
+            .captures_iter(confgen)
             .map(|capture| {
                 Arc::new(Self {
                     location: capture.get(1).unwrap().as_str().to_string(),
