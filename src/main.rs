@@ -57,7 +57,8 @@ async fn main() -> anyhow::Result<()> {
 
     // get the hostnames and their corresponding public keys
     let confgen = ctx.download_confgen().await.context("download confgen")?;
-    let hosts = Host::from_confgen(&confgen);
+    let mut hosts = Host::from_confgen(&confgen);
+    hosts.retain(|host| !ctx.config.location_blacklist.contains(&host.location));
 
     let results = ping::ping_all_ips(Arc::clone(&ctx), &hosts).await?;
     for result in results {
@@ -65,8 +66,6 @@ async fn main() -> anyhow::Result<()> {
         let stats = result.stats();
         log::info!("[{:^25}] {}", location, stats.format_millis());
     }
-
-    // println!("{:#?}", results);
 
     Ok((/* 👍 */))
 }

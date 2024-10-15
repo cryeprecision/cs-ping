@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::AtomicU16;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -9,7 +10,6 @@ use chrono::{TimeZone as _, Utc};
 use maxminddb::Reader;
 use reqwest::tls;
 use serde::{Deserialize, Deserializer};
-use surge_ping::{PingIdentifier, PingSequence};
 use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 use trust_dns_resolver::{Name, TokioAsyncResolver};
 
@@ -17,8 +17,8 @@ pub struct Context {
     pub resolver: TokioAsyncResolver,
     pub reqwest: reqwest::Client,
     pub surge_ping: surge_ping::Client,
-    pub config: Config,
     pub next_ping_id: AtomicU16,
+    pub config: Config,
 }
 
 impl Context {
@@ -34,8 +34,8 @@ impl Context {
                 .context("create reqwest client")?,
             surge_ping: surge_ping::Client::new(&surge_ping::Config::new())
                 .context("create surge_ping client")?,
-            config,
             next_ping_id: AtomicU16::new(0),
+            config,
         })
     }
 
@@ -63,32 +63,6 @@ impl Context {
             .with_context(|| format!("resolve ip of {}", hostname))
             .map(|ips| ips.into_iter().map(Ipv4Addr::from).collect::<Vec<_>>())
     }
-
-    pub async fn ping_ip(&self, ip: Ipv4Addr) -> anyhow::Result<Vec<Duration>> {
-        let ping_id = self.next_ping_id.fetch_add(1, Ordering::Relaxed);
-        let mut pinger = self
-            .surge_ping
-            .pinger(ip.into(), PingIdentifier(ping_id))
-            .await;
-
-        // set the timeout
-        pinger.timeout(self.config.ping_timeout);
-
-        let payload = [0u8; 56];
-        let mut results = Vec::with_capacity(self.config.pings_per_ip);
-        let mut retries = 0;
-        while results.len() < self.config.pings_per_ip && retries <= self.config.ping_retries {
-            let seq = PingSequence(((results.len() + retries) % u16::MAX as usize) as u16);
-            match pinger.ping(seq, &payload).await {
-                Ok((_, duration)) => results.push(duration),
-                Err(_) => retries += 1,
-            };
-            tokio::task::yield_now().await;
-        }
-
-        anyhow::ensure!(results.len() == self.config.pings_per_ip, "out of retries");
-        Ok(results)
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -99,11 +73,14 @@ pub struct Config {
     /// How many concurrent DNS requests are made.
     pub concurrent_dns: usize,
     /// How many concurrent pings are sent.
-    pub concurrent_pings: usize,
+    pub concurrent_pings_total: usize,
+    pub concurrent_pings_per_host: usize,
     /// How often each IP address is pinged.
     pub pings_per_ip: usize,
     /// How often a ping to an IP address is retried if it fails.
     pub ping_retries: usize,
+    /// List of locations to ignore
+    pub location_blacklist: HashSet<String>,
     /// Timeout of each ping.
     #[serde(deserialize_with = "Config::deserialize_duration_ms")]
     #[serde(rename = "ping_timeout_ms")]

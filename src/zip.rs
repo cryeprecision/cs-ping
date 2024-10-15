@@ -81,12 +81,11 @@ pub async fn write_configs(ctx: Arc<Context>, host_stats: &[HostStats]) -> anyho
 
     // write the configs to the zip archive in memory
     for host_stats in host_stats {
-        let HostStats { host, ips, .. } = host_stats;
+        let HostStats { host, .. } = host_stats;
+        let ips = host_stats.durations.keys().copied().collect::<Vec<_>>();
 
         let _asn_set = ctx.config.asn_mmdb.as_ref().map(|mmdb| {
-            host_stats
-                .ips
-                .iter()
+            ips.iter()
                 .filter_map(|&ip| mmdb.lookup::<Asn>(ip.into()).ok())
                 .collect::<Vec<_>>()
         });
