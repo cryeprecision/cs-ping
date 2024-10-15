@@ -1,18 +1,16 @@
-#![allow(dead_code)]
-
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use context::{Config, Context};
+use owo_colors::OwoColorize;
+use zip::Asn;
 
 mod context;
 mod ping;
 mod stats;
 mod util;
 mod zip;
-
-const CRYPTOSTORM_SUFFIX: &str = ".cstorm.is";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Host {
@@ -43,7 +41,7 @@ impl Host {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // initialize the logger implementation
     env_logger::builder()
@@ -61,10 +59,46 @@ async fn main() -> anyhow::Result<()> {
     hosts.retain(|host| !ctx.config.location_blacklist.contains(&host.location));
 
     let results = ping::ping_all_ips(Arc::clone(&ctx), &hosts).await?;
-    for result in results {
+
+    zip::write_configs(Arc::clone(&ctx), &results)
+        .await
+        .context("write configs")?;
+
+    for result in &results {
         let location = result.host.location.as_str();
         let stats = result.stats();
-        log::info!("[{:^25}] {}", location, stats.format_millis());
+
+        log::info!("[{:^25}] {}", location.bold(), stats.format_millis());
+
+        if let Some(mmdb) = ctx.config.asn_mmdb.as_ref() {
+            let mut ips = result.durations.keys().copied().collect::<Vec<_>>();
+            ips.sort_unstable();
+
+            for ip in ips {
+                let Ok(asn) = mmdb.lookup::<Asn>(ip.into()) else {
+                    log::warn!("ASN info not found in DB for IP: {}", ip);
+                    continue;
+                };
+                let stats = result.stats_for_ip(ip);
+
+                log::info!(
+                    "{}",
+                    format!(
+                        "[{:^25}] {} {}",
+                        location,
+                        stats.format_millis(),
+                        format!(
+                            "{domain} ({name}) {ip}",
+                            domain = asn.domain,
+                            name = asn.name,
+                            ip = ip,
+                        )
+                        .bright_black(),
+                    )
+                    .bright_black()
+                );
+            }
+        }
     }
 
     Ok((/* 👍 */))
