@@ -139,8 +139,8 @@ impl JobIter {
         host_state
             .ips_left
             .iter()
-            .map(|&ip_left_idx| {
-                let ip_state = &host_state.ips[host_state.ips_left[ip_left_idx]];
+            .map(|&ip_idx| {
+                let ip_state = &host_state.ips[ip_idx];
                 self.ctx.config.pings_per_ip - ip_state.pings
             })
             .sum()
@@ -149,7 +149,7 @@ impl JobIter {
     pub fn pings_left(&self) -> usize {
         self.hosts_left
             .iter()
-            .map(|&host_left_idx| self.pings_left_for_host(self.hosts_left[host_left_idx]))
+            .map(|&host_idx| self.pings_left_for_host(host_idx))
             .sum()
     }
 
@@ -257,7 +257,7 @@ impl Job {
                 };
 
                 // if this error is the one that is one too many, log it
-                if job.host_retries.fetch_add(1, Ordering::SeqCst) == retries + 1 {
+                if job.host_retries.fetch_add(1, Ordering::SeqCst) == retries {
                     bar.suspend(|| {
                         log::warn!(
                             "Pinging {} {} failed too many times: {}",
