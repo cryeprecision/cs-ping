@@ -28,7 +28,7 @@ pub async fn write_configs(ctx: Arc<Context>, host_stats: &[HostStats]) -> anyho
     // create the directory where the configs will be saved if it doesn't exist yet
     if !tokio::fs::metadata(&archive_folder)
         .await
-        .map_or(false, |metadata| metadata.is_dir())
+        .is_ok_and(|metadata| metadata.is_dir())
     {
         tokio::fs::create_dir(&archive_folder)
             .await

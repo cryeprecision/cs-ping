@@ -13,7 +13,7 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn format_millis(&self) -> PrintStatsMillis {
+    pub fn format_millis(&'_ self) -> PrintStatsMillis<'_> {
         PrintStatsMillis { stats: self }
     }
 

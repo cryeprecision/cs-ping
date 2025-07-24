@@ -129,7 +129,7 @@ impl JobIter {
             bar,
             hosts: host_states,
             hosts_left,
-            rng: Xoshiro256PlusPlus::from_entropy(),
+            rng: Xoshiro256PlusPlus::from_os_rng(),
         })
     }
 
@@ -172,7 +172,7 @@ impl Iterator for JobIter {
 
         while !self.hosts_left.is_empty() {
             // Choose a random host
-            let host_left_idx = self.rng.gen_range(0..self.hosts_left.len());
+            let host_left_idx = self.rng.random_range(0..self.hosts_left.len());
             let host_idx = self.hosts_left[host_left_idx];
             let host_state = &mut self.hosts[host_idx];
 
@@ -185,7 +185,7 @@ impl Iterator for JobIter {
 
             while !host_state.ips_left.is_empty() {
                 // Choose a random IP
-                let ip_left_idx = self.rng.gen_range(0..host_state.ips_left.len());
+                let ip_left_idx = self.rng.random_range(0..host_state.ips_left.len());
                 let ip_idx = host_state.ips_left[ip_left_idx];
                 let ip_state = &mut host_state.ips[ip_idx];
 

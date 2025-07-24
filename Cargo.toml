@@ -16,7 +16,7 @@ anyhow = { version = "1" }
 log = { version = "0", features = ["release_max_level_info"] }
 env_logger = { version = "0" }
 dotenv = { version = "0" }
-zip = { version = "2", default-features = false }
+zip = { version = "4", default-features = false }
 chrono = { version = "0" }
 maxminddb = { version = "0" }
 serde = { version = "1", features = ["derive"] }

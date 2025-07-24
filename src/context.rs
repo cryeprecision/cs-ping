@@ -45,22 +45,22 @@ impl Context {
             .get(script_url)
             .send()
             .await
-            .with_context(|| format!("download script from {}", script_url))?
+            .with_context(|| format!("download script from {script_url}"))?
             .error_for_status()
-            .with_context(|| format!("unexpected status code from {}", script_url))?
+            .with_context(|| format!("unexpected status code from {script_url}"))?
             .text()
             .await
-            .with_context(|| format!("read script from {}", script_url))
+            .with_context(|| format!("read script from {script_url}"))
     }
 
     pub async fn resolve_hostname(&self, hostname: &str) -> anyhow::Result<Vec<Ipv4Addr>> {
         let name = Name::from_utf8(hostname)
-            .with_context(|| format!("convert host {} to a name", hostname))?;
+            .with_context(|| format!("convert host {hostname} to a name"))?;
 
         self.resolver
             .ipv4_lookup(name)
             .await
-            .with_context(|| format!("resolve ip of {}", hostname))
+            .with_context(|| format!("resolve ip of {hostname}"))
             .map(|ips| ips.into_iter().map(Ipv4Addr::from).collect::<Vec<_>>())
     }
 }
@@ -123,10 +123,7 @@ impl Config {
 
         let mmdb_age = Utc::now() - build_date;
         if mmdb_age > chrono::Duration::days(30) {
-            log::warn!(
-                "mmdb file is older than 30 days ({}), consider updating it",
-                mmdb_age
-            );
+            log::warn!("mmdb file is older than 30 days ({mmdb_age}), consider updating it",);
         }
 
         Ok(Some(reader))
@@ -187,27 +184,27 @@ impl WireguardConfig {
         writeln!(buffer, "DNS = {}", self.client_dns).unwrap();
 
         for pre_up in &self.pre_up {
-            writeln!(buffer, "PreUp = {}", pre_up).unwrap();
+            writeln!(buffer, "PreUp = {pre_up}").unwrap();
         }
         for post_up in &self.post_up {
-            writeln!(buffer, "PostUp = {}", post_up).unwrap();
+            writeln!(buffer, "PostUp = {post_up}").unwrap();
         }
         for pre_down in &self.pre_down {
-            writeln!(buffer, "PreDown = {}", pre_down).unwrap();
+            writeln!(buffer, "PreDown = {pre_down}").unwrap();
         }
         for post_down in &self.post_down {
-            writeln!(buffer, "PostDown = {}", post_down).unwrap();
+            writeln!(buffer, "PostDown = {post_down}").unwrap();
         }
 
         writeln!(buffer).unwrap();
         writeln!(buffer, "[Peer]").unwrap();
-        writeln!(buffer, "PublicKey = {}", server_public_key).unwrap();
-        writeln!(buffer, "Endpoint = {}", server_endpoint).unwrap();
+        writeln!(buffer, "PublicKey = {server_public_key}").unwrap();
+        writeln!(buffer, "Endpoint = {server_endpoint}").unwrap();
         if let Some(preshared_key) = &self.server_preshared_key {
-            writeln!(buffer, "PresharedKey = {}", preshared_key).unwrap();
+            writeln!(buffer, "PresharedKey = {preshared_key}").unwrap();
         }
         if let Some(persistent_keepalive) = &self.persistent_keepalive {
-            writeln!(buffer, "PersistentKeepalive = {}", persistent_keepalive).unwrap();
+            writeln!(buffer, "PersistentKeepalive = {persistent_keepalive}").unwrap();
         }
         writeln!(buffer, "AllowedIPs = {}", self.client_allowed_ips).unwrap();
 

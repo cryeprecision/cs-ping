@@ -2,6 +2,7 @@
 /configs/
 /.env
 /asn.mmdb
+/ipinfo_lite.mmdb
 /config.json
 /privatekey
 /publickey

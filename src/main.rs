@@ -75,8 +75,8 @@ async fn main() -> anyhow::Result<()> {
             ips.sort_unstable();
 
             for ip in ips {
-                let Ok(asn) = mmdb.lookup::<Asn>(ip.into()) else {
-                    log::warn!("ASN info not found in DB for IP: {}", ip);
+                let Ok(Some(asn)) = mmdb.lookup::<Asn>(ip.into()) else {
+                    log::warn!("ASN info not found in DB for IP: {ip}");
                     continue;
                 };
                 let stats = result.stats_for_ip(ip);
